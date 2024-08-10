@@ -16,8 +16,17 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
+    int ret;
 
-    return true;
+    if(cmd == NULL) {
+        return false;
+    }
+
+    ret = system(cmd);
+    if(ret == 0) 
+        return true; 
+    
+    return false;
 }
 
 /**
@@ -58,10 +67,25 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
+    int pid;
+    int status;
+    bool ret;
+    
+
+    fflush(stdout);
+    pid = fork();
+    if (pid == -1) {
+        ret = false;
+    } else if (pid == 0) {
+        execv(command[0], command + 1); // If this fails exit(-1) will run
+        exit(-1);
+    }
+    if (waitpid (pid, &status, 0) == -1)
+        ret = false;
 
     va_end(args);
 
-    return true;
+    return ret;
 }
 
 /**
@@ -92,8 +116,35 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
+    bool ret;
+
+    int fd;
+    fd = open(outputfile, O_WRONLY|O_CREAT, 0744);
+    if (fd < 0) {
+        printf("Failed opening file!\n");
+        ret = false;
+    }
+
+    int pid;
+    int status;
+
+    fflush(stdout);
+    pid = fork();
+    if (pid == -1) {
+        ret = false;
+    } else if (pid == 0) {
+        if (dup2(fd, STDOUT_FILENO) < 0) { exit(-1); }
+
+        execv(command[0], command + 1); // If this fails exit(-1) will run
+        exit(-1);
+    }
+    
+    if (waitpid (pid, &status, 0) == -1)
+        ret = false;
+
+    if (fd > 0) { close(fd); }
 
     va_end(args);
 
-    return true;
+    return ret;
 }
