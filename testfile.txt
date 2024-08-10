@@ -1,2 +1,2 @@
-
-ome is /home/raffy
+home is $HOME
+raffy

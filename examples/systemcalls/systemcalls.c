@@ -77,7 +77,7 @@ bool do_exec(int count, ...)
     if (pid == -1) {
         ret = false;
     } else if (pid == 0) {
-        execv(command[0], command + 1); // If this fails exit(-1) will run
+        execv(command[0], command); // If this fails exit(-1) will run
         exit(-1);
     }
     if (waitpid (pid, &status, 0) == -1)
@@ -118,32 +118,33 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
 */
     bool ret;
 
-    int fd;
-    fd = open(outputfile, O_WRONLY|O_CREAT, 0744);
-    if (fd < 0) {
-        printf("Failed opening file!\n");
-        ret = false;
-    }
-
     int pid;
     int status;
+
+    int fd;
+    fd = open(outputfile, O_WRONLY|O_CREAT, 644);
+    if (fd < 0) {
+        ret = false;
+    }
 
     fflush(stdout);
     pid = fork();
     if (pid == -1) {
         ret = false;
     } else if (pid == 0) {
-        if (dup2(fd, STDOUT_FILENO) < 0) { exit(-1); }
-
-        execv(command[0], command + 1); // If this fails exit(-1) will run
+        if (dup2(fd, STDOUT_FILENO) < 0) {
+            exit(-1);
+        }
+        execv(command[0], command); // If this fails exit(-1) will run
         exit(-1);
     }
     
     if (waitpid (pid, &status, 0) == -1)
         ret = false;
 
-    if (fd > 0) { close(fd); }
-
+    if (fd > 0) {
+        close(fd);
+    }
     va_end(args);
 
     return ret;
