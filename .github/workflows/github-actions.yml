@@ -16,7 +16,11 @@ jobs:
           - name: Run unit test
             run: ./unit-test.sh
     full-test:
+<<<<<<< HEAD
         container: cuaesd/aesd-autotest:assignment3
+=======
+        container: cuaesd/aesd-autotest:assignment5
+>>>>>>> assignments-base/assignment5
         runs-on: self-hosted
         steps:
           - uses: actions/checkout@v2
