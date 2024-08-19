@@ -1,0 +1,38 @@
+#!/bin/sh
+
+NAME=aesdsocket
+DAEMON=/usr/bin/aesdsocket
+DAEMON_ARGS="-d"
+STOP_SIGNAL=INT
+
+do_start() {
+    start-stop-daemon -S -n $NAME -c "exec $DAEMON $DAEMON_ARGS"
+}
+
+do_stop() {
+    start-stop-daemon -K -s $STOP_SIGNAL -n $NAME
+}
+
+do_status() {
+    start-stop-daemon -T -n $NAME && exit 0 || exit $?
+}
+
+case "$1" in
+  start)
+    echo -n "Starting daemon: "$NAME
+    do_start
+    echo "."
+    ;;
+  stop)
+	echo -n "Stopping daemon: "$NAME
+    do_stop
+    echo "."
+    ;;
+  status)
+    do_status
+    ;;
+  *)
+	echo "Usage: $SCRIPTNAME {start|stop|status}" >&2
+	exit 3
+	;;
+esac
