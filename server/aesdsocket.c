@@ -23,28 +23,10 @@ int data_fd = -1;
 
 bool should_terminate = false;
 
-void cleanup_server() {
-    if (server_sock != -1) {
-        close(server_sock);
-    }
-
-    if (data_fd != -1) {
-        close(data_fd);
-    }
-
-    if (remove(CONNECTION_DATA_FILE) == 0) {
-        syslog(LOG_INFO, "Deleted file %s", CONNECTION_DATA_FILE);
-    } else {
-        syslog(LOG_ERR, "Failed to delete file %s: %s", CONNECTION_DATA_FILE, strerror(errno));
-    }
-
-    syslog(LOG_INFO, "Server exiting");
-    closelog();
-}
-
 void signal_handler(int signum) {
     if (signum == SIGINT || signum == SIGTERM) {
-        syslog(LOG_INFO, "Caught signal, exiting");  
+        syslog(LOG_INFO, "Caught signal, exiting");
+        close(server_sock); // this to avoid -> Accept failed: Bad file descriptor, not very graceful
         should_terminate = true;
     }
 }
@@ -78,10 +60,39 @@ void start_daemon() {
     openlog(LOG_IDENTITY, LOG_PID, LOG_DAEMON);
 }
 
+int write_data_to_file(int fd, char* data, size_t len) {   
+    if (write(fd, data, len) == -1) {
+        syslog(LOG_ERR, "Failed to write to file: %s", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+int send_data_from_file(int fd, int client_fd) {
+    ssize_t bytes_read;
+    char file_buffer[1024];
+
+    lseek(fd, 0, SEEK_SET);
+    while ((bytes_read = read(fd, file_buffer, 1024)) > 0) {
+        syslog(LOG_DEBUG, "Sending %ld", bytes_read);
+        if (send(client_fd, file_buffer, bytes_read, 0) == -1) {
+            syslog(LOG_ERR, "Failed to send data to client: %s", strerror(errno));
+            return -1;
+        }
+    }
+
+    if (bytes_read == -1) {
+        syslog(LOG_ERR, "Failed to read from file: %s", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
 void handle_connection(int socket_fd, struct sockaddr_in *client_addr) {
     ssize_t bytes_received;
+    size_t curr_packet_len = 0;
     char conn_buffer[CONNECTION_BUFFER_SIZE];
-    char file_buffer[CONNECTION_BUFFER_SIZE];
     char client_ip[INET_ADDRSTRLEN];
     
     /* Logging connection ip address */
@@ -97,36 +108,28 @@ void handle_connection(int socket_fd, struct sockaddr_in *client_addr) {
     }
 
     /* Handling data */
-    while ((bytes_received = recv(socket_fd, conn_buffer, CONNECTION_BUFFER_SIZE, 0)) > 0 && !should_terminate) {
+    while ((bytes_received = recv(socket_fd, (char*)(conn_buffer + curr_packet_len), CONNECTION_BUFFER_SIZE, 0)) > 0 && !should_terminate) {
         char *newline = strchr(conn_buffer, '\n'); // Check for newline
         if (newline) {
             newline++;
 
             size_t packet_length = newline - conn_buffer;
-            if (write(data_fd, conn_buffer, packet_length) == -1) {
-                syslog(LOG_ERR, "Failed to write to file: %s", strerror(errno));
+            syslog(LOG_DEBUG, "Recived size %ld", packet_length);
+            if(write_data_to_file(data_fd, conn_buffer, packet_length) == -1) {
                 close(data_fd);
                 close(socket_fd);
                 return;
             }
 
-            lseek(data_fd, 0, SEEK_SET);
-            ssize_t bytes_read;
-            while ((bytes_read = read(data_fd, file_buffer, CONNECTION_BUFFER_SIZE)) > 0) {
-                if (send(socket_fd, file_buffer, bytes_read, 0) == -1) {
-                    syslog(LOG_ERR, "Failed to send data to client: %s", strerror(errno));
-                    close(data_fd);
-                    close(socket_fd);
-                    return;
-                }
-            }
-
-            if (bytes_read == -1) {
-                syslog(LOG_ERR, "Failed to read from file: %s", strerror(errno));
+            if(send_data_from_file(data_fd, socket_fd) == -1) {
                 close(data_fd);
                 close(socket_fd);
                 return;
             }
+            curr_packet_len = 0;
+        } else {
+            curr_packet_len += bytes_received;
+            if(curr_packet_len > CONNECTION_BUFFER_SIZE - 1) curr_packet_len = 0; 
         }
     }
 
@@ -135,8 +138,10 @@ void handle_connection(int socket_fd, struct sockaddr_in *client_addr) {
     }
 
     /* Closing data file */
+    syslog(LOG_DEBUG, "Closing data file for %s", client_ip);
     close(data_fd);
     data_fd = -1;
+
     /* Closing connection */
     close(socket_fd);
     /* Logging closed connection */
@@ -169,12 +174,14 @@ int main(int argc, char const *argv[]) {
     /* Adding signal handler */
     if (signal(SIGTERM, signal_handler) == SIG_ERR) {
         syslog(LOG_ERR, "Failed to register SIGTERM: %s", strerror(errno));
-        cleanup_server();
+        closelog();
+
         return EXIT_FAILURE;
     }
     if (signal(SIGINT, signal_handler) == SIG_ERR) {
         syslog(LOG_ERR, "Failed to register SIGINT: %s", strerror(errno));
-        cleanup_server();
+        closelog();
+
         return EXIT_FAILURE;
     }
 
@@ -187,8 +194,6 @@ int main(int argc, char const *argv[]) {
     int so_reuseaddr = 1;
     if (setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &so_reuseaddr, sizeof(int)) == -1) {
         syslog(LOG_ERR, "Setsockopt failed: %s", strerror(errno));
-        cleanup_server();
-        return EXIT_SUCCESS;
     }
 
     memset(&server_addr, 0, sizeof(server_addr));
@@ -198,29 +203,50 @@ int main(int argc, char const *argv[]) {
 
     if (bind(server_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1) {
         syslog(LOG_ERR, "Bind failed: %s", strerror(errno));
-        cleanup_server();
+        if (server_sock != -1) {
+            close(server_sock);
+        }
+        syslog(LOG_INFO, "Server exiting");
+        closelog();
         return EXIT_SUCCESS;
     }
 
     if (listen(server_sock, BACKLOG) == -1) {
         syslog(LOG_ERR, "Listen failed: %s", strerror(errno));
-        cleanup_server();
+        if (server_sock != -1) {
+            close(server_sock);
+        }
+        syslog(LOG_INFO, "Server exiting");
+        closelog();
         return EXIT_SUCCESS;
     }
 
     syslog(LOG_INFO, "Listening on port %d", SERVER_PORT);
 
     while (!should_terminate) {
-        int client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &addr_len);
-        if (client_sock == -1) {
-            syslog(LOG_ERR, "Accept failed: %s", strerror(errno));
-            continue;
-        }
+        if(server_sock != -1) {
+            int client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &addr_len);
+            if (client_sock == -1) {
+                syslog(LOG_ERR, "Accept failed: %s", strerror(errno));
+                continue;
+            }
 
-        handle_connection(client_sock, &client_addr);
+            handle_connection(client_sock, &client_addr);
+        }
     }
 
-    cleanup_server();
+    if (remove(CONNECTION_DATA_FILE) == 0) {
+        syslog(LOG_INFO, "Deleted file %s", CONNECTION_DATA_FILE);
+    } else {
+        syslog(LOG_ERR, "Failed to delete file %s: %s", CONNECTION_DATA_FILE, strerror(errno));
+    }
+
+    if (server_sock != -1) {
+        close(server_sock);
+    }
+    
+    syslog(LOG_INFO, "Server exiting");
+    closelog();
     
     return EXIT_SUCCESS;
 }
