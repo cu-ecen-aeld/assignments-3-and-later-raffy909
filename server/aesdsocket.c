@@ -89,6 +89,58 @@ int send_data_from_file(int fd, int client_fd) {
     return 0;
 }
 
+/* Read characters from 'fd' until a newline is encountered. If a newline
+  character is not encountered in the first (n - 1) bytes, then the excess
+  characters are discarded. The returned string placed in 'buf' is
+  null-terminated and includes the newline character if it was read in the
+  first (n - 1) bytes. The function return value is the number of bytes
+  placed in buffer (which includes the newline character if encountered,
+  but excludes the terminating null byte). */
+
+ssize_t read_line(int fd, void *buffer, size_t n) {
+    ssize_t numRead;                    /* # of bytes fetched by last read() */
+    size_t totRead;                     /* Total bytes read so far */
+    char *buf;
+    char ch;
+
+    if (n <= 0 || buffer == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    buf = buffer;                       /* No pointer arithmetic on "void *" */
+
+    totRead = 0;
+    for (;;) {
+        numRead = read(fd, &ch, 1);
+
+        if (numRead == -1) {
+            if (errno == EINTR)         /* Interrupted --> restart read() */
+                continue;
+            else
+                return -1;              /* Some other error */
+
+        } else if (numRead == 0) {      /* EOF */
+            if (totRead == 0)           /* No bytes read; return 0 */
+                return 0;
+            else                        /* Some bytes read; add '\0' */
+                break;
+
+        } else {                        /* 'numRead' must be 1 if we get here */
+            if (totRead < n - 1) {      /* Discard > (n - 1) bytes */
+                totRead++;
+                *buf++ = ch;
+            }
+
+            if (ch == '\n')
+                break;
+        }
+    }
+
+    *buf = '\0';
+    return totRead;
+}
+
 void handle_connection(int socket_fd, struct sockaddr_in *client_addr) {
     ssize_t bytes_received;
     size_t curr_packet_len = 0;
@@ -108,28 +160,20 @@ void handle_connection(int socket_fd, struct sockaddr_in *client_addr) {
     }
 
     /* Handling data */
-    while ((bytes_received = recv(socket_fd, (char*)(conn_buffer + curr_packet_len), CONNECTION_BUFFER_SIZE, 0)) > 0 && !should_terminate) {
-        char *newline = strchr(conn_buffer, '\n'); // Check for newline
-        if (newline) {
-            newline++;
+    //while ((bytes_received = recv(socket_fd, (char*)(conn_buffer + curr_packet_len), CONNECTION_BUFFER_SIZE, 0)) > 0 && !should_terminate) {
+    while((bytes_received = read_line(socket_fd, conn_buffer, CONNECTION_BUFFER_SIZE)) > 0 && !should_terminate) {
+        syslog(LOG_DEBUG, "Newline found"); 
+    
+        if(write_data_to_file(data_fd, conn_buffer, bytes_received) == -1) {
+            close(data_fd);
+            close(socket_fd);
+            return;
+        }
 
-            size_t packet_length = newline - conn_buffer;
-            syslog(LOG_DEBUG, "Recived size %ld", packet_length);
-            if(write_data_to_file(data_fd, conn_buffer, packet_length) == -1) {
-                close(data_fd);
-                close(socket_fd);
-                return;
-            }
-
-            if(send_data_from_file(data_fd, socket_fd) == -1) {
-                close(data_fd);
-                close(socket_fd);
-                return;
-            }
-            curr_packet_len = 0;
-        } else {
-            curr_packet_len += bytes_received;
-            if(curr_packet_len > CONNECTION_BUFFER_SIZE - 1) curr_packet_len = 0; 
+        if(send_data_from_file(data_fd, socket_fd) == -1) {
+            close(data_fd);
+            close(socket_fd);
+            return;
         }
     }
 
