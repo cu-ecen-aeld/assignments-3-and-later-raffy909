@@ -49,7 +49,9 @@ void start_daemon() {
     }
     
     umask(0);
-    chdir("/");
+    if(chdir("/") == -1) {
+        exit(EXIT_FAILURE);
+    }
 
     /* Close all open file descriptors */
     int x;
@@ -143,7 +145,6 @@ ssize_t read_line(int fd, void *buffer, size_t n) {
 
 void handle_connection(int socket_fd, struct sockaddr_in *client_addr) {
     ssize_t bytes_received;
-    size_t curr_packet_len = 0;
     char conn_buffer[CONNECTION_BUFFER_SIZE];
     char client_ip[INET_ADDRSTRLEN];
     
@@ -212,7 +213,28 @@ int main(int argc, char const *argv[]) {
 
     /* Check if need to run as daemon */
     if (run_as_daemon) {
-        start_daemon();
+        pid_t pid;
+        pid = fork();
+       
+        if (pid == -1) {
+            return EXIT_FAILURE;
+        }
+        else if (pid != 0) {
+            return EXIT_SUCCESS;
+        }
+
+        if (setsid() == -1) {
+            return EXIT_FAILURE;
+        }
+        if(chdir("/") == -1) {
+            return EXIT_FAILURE;
+        }
+
+        dup2(open("/dev/null", O_RDWR), STDIN_FILENO);
+        dup2(STDIN_FILENO, STDOUT_FILENO);
+        dup2(STDOUT_FILENO, STDERR_FILENO);
+
+        openlog(LOG_IDENTITY, LOG_PID, LOG_DAEMON);
     }
 
     /* Adding signal handler */
