@@ -31,37 +31,6 @@ void signal_handler(int signum) {
     }
 }
 
-void start_daemon() {
-    switch(fork()) {
-        case -1: return;
-        case 0: break; 
-        default: exit(EXIT_SUCCESS);
-    }
-
-    if(setsid() == -1) {
-        return;
-    }
-
-    switch(fork()) {
-        case -1: return;
-        case 0: break;
-        default: exit(EXIT_SUCCESS);
-    }
-    
-    umask(0);
-    if(chdir("/") == -1) {
-        exit(EXIT_FAILURE);
-    }
-
-    /* Close all open file descriptors */
-    int x;
-    for (x = sysconf(_SC_OPEN_MAX); x>=0; x--) {
-        close (x);
-    }
-    
-    openlog(LOG_IDENTITY, LOG_PID, LOG_DAEMON);
-}
-
 int write_data_to_file(int fd, char* data, size_t len) {   
     if (write(fd, data, len) == -1) {
         syslog(LOG_ERR, "Failed to write to file: %s", strerror(errno));
