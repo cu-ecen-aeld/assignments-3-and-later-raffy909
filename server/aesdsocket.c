@@ -11,16 +11,41 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <pthread.h>
+
+#include "read_line.h"
+#include "queue.h"
 
 #define LOG_IDENTITY            "aesdsocketd"
 #define SERVER_PORT             9000
 #define BACKLOG                 10
 #define CONNECTION_BUFFER_SIZE  65536
 #define CONNECTION_DATA_FILE    "/var/tmp/aesdsocketdata"
+#define TIMER_SLEEP             10
+
+/* Thread list types */
+typedef struct {
+    pthread_t thread;
+    bool thread_complete;
+    int connection_fd;
+    struct sockaddr_in client_addr;
+} thread_data_t;
+
+typedef struct list_data_s list_data_t;
+struct list_data_s {
+    thread_data_t* item;
+    LIST_ENTRY(list_data_s) entries;
+};
+
+/* Filestore types */
+typedef struct file_store_s {
+    int fd;
+    pthread_mutex_t file_mutex; 
+} file_store_t;
+
 
 int server_sock = -1;
-int data_fd = -1;
-
+file_store_t filestore;
 bool should_terminate = false;
 
 void signal_handler(int signum) {
@@ -31,143 +56,195 @@ void signal_handler(int signum) {
     }
 }
 
-int write_data_to_file(int fd, char* data, size_t len) {   
-    if (write(fd, data, len) == -1) {
+/* Filestore functions */
+int init_filestore() {
+    filestore.fd = open(CONNECTION_DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
+    if (filestore.fd == -1) {
+        return -1;
+    }
+
+    if (pthread_mutex_init(&(filestore.file_mutex), NULL) == -1) {
+        close(filestore.fd);
+        return -1;
+    }
+
+    return 0;
+}
+
+int filestore_write(char* data, size_t len) {
+
+    int rc = pthread_mutex_lock(&(filestore.file_mutex));
+    if ( rc != 0 ) {
+        syslog(LOG_ERR, "Failed to acquire filestore mutex");
+        return -1;
+    }
+    if (write(filestore.fd, data, len) == -1) {
         syslog(LOG_ERR, "Failed to write to file: %s", strerror(errno));
         return -1;
     }
+    rc = pthread_mutex_unlock(&(filestore.file_mutex));
+    if ( rc != 0 ) {
+        syslog(LOG_ERR, "Failed to release filestore mutex");
+        return -1;
+    }
+    
     return 0;
 }
 
-int send_data_from_file(int fd, int client_fd) {
-    ssize_t bytes_read;
+int filestore_read_to_dest(int dest_fd) {
+    int ret = 0;
+    size_t bytes_read;
     char file_buffer[1024];
-
-    lseek(fd, 0, SEEK_SET);
-    while ((bytes_read = read(fd, file_buffer, 1024)) > 0) {
-        syslog(LOG_DEBUG, "Sending %ld", bytes_read);
-        if (send(client_fd, file_buffer, bytes_read, 0) == -1) {
-            syslog(LOG_ERR, "Failed to send data to client: %s", strerror(errno));
-            return -1;
-        }
-    }
-
-    if (bytes_read == -1) {
-        syslog(LOG_ERR, "Failed to read from file: %s", strerror(errno));
-        return -1;
-    }
-
-    return 0;
-}
-
-/* Read characters from 'fd' until a newline is encountered. If a newline
-  character is not encountered in the first (n - 1) bytes, then the excess
-  characters are discarded. The returned string placed in 'buf' is
-  null-terminated and includes the newline character if it was read in the
-  first (n - 1) bytes. The function return value is the number of bytes
-  placed in buffer (which includes the newline character if encountered,
-  but excludes the terminating null byte). */
-
-ssize_t read_line(int fd, void *buffer, size_t n) {
-    ssize_t numRead;                    /* # of bytes fetched by last read() */
-    size_t totRead;                     /* Total bytes read so far */
-    char *buf;
-    char ch;
-
-    if (n <= 0 || buffer == NULL) {
-        errno = EINVAL;
-        return -1;
-    }
-
-    buf = buffer;                       /* No pointer arithmetic on "void *" */
-
-    totRead = 0;
-    for (;;) {
-        numRead = read(fd, &ch, 1);
-
-        if (numRead == -1) {
-            if (errno == EINTR)         /* Interrupted --> restart read() */
-                continue;
-            else
-                return -1;              /* Some other error */
-
-        } else if (numRead == 0) {      /* EOF */
-            if (totRead == 0)           /* No bytes read; return 0 */
-                return 0;
-            else                        /* Some bytes read; add '\0' */
-                break;
-
-        } else {                        /* 'numRead' must be 1 if we get here */
-            if (totRead < n - 1) {      /* Discard > (n - 1) bytes */
-                totRead++;
-                *buf++ = ch;
+    
+    int rc = pthread_mutex_lock(&(filestore.file_mutex));
+    if ( rc != 0 ) {
+        syslog(LOG_ERR, "Failed to acquire filestore mutex");
+        ret = -1;
+    } else {
+        lseek(filestore.fd, 0, SEEK_SET);
+        while ((bytes_read = read(filestore.fd, file_buffer, 1024)) > 0 && ret != -1) {
+            syslog(LOG_DEBUG, "Sending %ld", bytes_read);
+            if (send(dest_fd, file_buffer, bytes_read, 0) == -1) {
+                syslog(LOG_ERR, "Failed to send data to client: %s", strerror(errno));
+                ret = -1;
             }
-
-            if (ch == '\n')
-                break;
+        }
+        if (bytes_read == -1UL) {
+            syslog(LOG_ERR, "Failed to read from file: %s", strerror(errno));
+            ret = -1;
+        }
+        rc = pthread_mutex_unlock(&(filestore.file_mutex));
+        if ( rc != 0 ) {
+            syslog(LOG_ERR, "Failed to release filestore mutex");
+            ret =  -1;
         }
     }
 
-    *buf = '\0';
-    return totRead;
+    
+    return ret;
+}   
+
+void filestore_close() {
+
+    if (remove(CONNECTION_DATA_FILE) == 0) {
+        syslog(LOG_INFO, "Deleted file %s", CONNECTION_DATA_FILE);
+    } else {
+        syslog(LOG_ERR, "Failed to delete file %s: %s", CONNECTION_DATA_FILE, strerror(errno));
+    }
+    //free(filestore);
 }
 
-void handle_connection(int socket_fd, struct sockaddr_in *client_addr) {
+void* handle_connection(void *thread_args) {
     ssize_t bytes_received;
     char conn_buffer[CONNECTION_BUFFER_SIZE];
     char client_ip[INET_ADDRSTRLEN];
     
-    /* Logging connection ip address */
-    inet_ntop(AF_INET, &(client_addr->sin_addr), client_ip, INET_ADDRSTRLEN);
-    syslog(LOG_INFO, "Accepted connection from %s", client_ip);
+    thread_data_t* thread_func_args = (thread_data_t *) thread_args;
+    bool operation_failed = false;
 
-    /* Opening file for storing data */
-    data_fd = open(CONNECTION_DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
-    if (data_fd == -1) {
-        syslog(LOG_ERR, "Failed to open or create file: %s", strerror(errno));
-        close(socket_fd);
-        return;
-    }
+    /* Logging connection ip address */
+    inet_ntop(AF_INET, &(thread_func_args->client_addr), client_ip, INET_ADDRSTRLEN);
+    syslog(LOG_INFO, "[Thread-%ld] Accepted connection from %s", thread_func_args->thread, client_ip);
 
     /* Handling data */
-    //while ((bytes_received = recv(socket_fd, (char*)(conn_buffer + curr_packet_len), CONNECTION_BUFFER_SIZE, 0)) > 0 && !should_terminate) {
-    while((bytes_received = read_line(socket_fd, conn_buffer, CONNECTION_BUFFER_SIZE)) > 0 && !should_terminate) {
-        syslog(LOG_DEBUG, "Newline found"); 
+    while(((bytes_received = read_line(thread_func_args->connection_fd, conn_buffer, CONNECTION_BUFFER_SIZE)) > 0 && !should_terminate) && !operation_failed) {
+        syslog(LOG_DEBUG, "[Thread-%ld] Newline found", thread_func_args->thread); 
     
-        if(write_data_to_file(data_fd, conn_buffer, bytes_received) == -1) {
-            close(data_fd);
-            close(socket_fd);
-            return;
+        if(filestore_write(conn_buffer, bytes_received) == -1) {
+            syslog(LOG_ERR, "[Thread-%ld] Write failed to filestore\n", thread_func_args->thread);
+            operation_failed = true;
         }
 
-        if(send_data_from_file(data_fd, socket_fd) == -1) {
-            close(data_fd);
-            close(socket_fd);
-            return;
+        if(filestore_read_to_dest(thread_func_args->connection_fd) == -1) {
+            syslog(LOG_ERR, "[Thread-%ld] Read failed to filestore\n", thread_func_args->thread);
+            operation_failed = true;
         }
     }
 
     if (bytes_received == -1) {
-        syslog(LOG_ERR, "Failed to receive data: %s", strerror(errno));
+        syslog(LOG_ERR, "[Thread-%ld] Failed to receive data: %s", thread_func_args->thread, strerror(errno));
     }
 
-    /* Closing data file */
-    syslog(LOG_DEBUG, "Closing data file for %s", client_ip);
-    close(data_fd);
-    data_fd = -1;
-
     /* Closing connection */
-    close(socket_fd);
+    close(thread_func_args->connection_fd);
+    thread_func_args->thread_complete = true;
     /* Logging closed connection */
-    syslog(LOG_INFO, "Closed connection from %s", client_ip);
+    syslog(LOG_INFO, "[Thread-%ld] Closed connection from %s", thread_func_args->thread, client_ip);
+
+    return thread_func_args;
+}
+
+/* Simplest solution*/
+void* timer_thread(void *args) {
+    char timestamp[100];
+    while (true) {
+        sleep(TIMER_SLEEP);
+
+        time_t now = time(NULL);
+        struct tm *tm_info = localtime(&now);
+        strftime(timestamp, sizeof(timestamp), "timestamp:%a, %d %b %Y %H:%M:%S %z\n", tm_info);
+        filestore_write(timestamp, strlen(timestamp));
+        
+    }
+
+    syslog(LOG_INFO, "Timer thread terminating...\n");
+    
+    return args;
+}
+
+list_data_t* init_conn_list_item(int conn_fd, struct sockaddr_in client_addr) {
+     thread_data_t* thread_data = (thread_data_t*)malloc(sizeof(thread_data_t));
+    if (thread_data == NULL) {
+        return NULL;
+    }
+
+    thread_data->thread_complete = false;
+    thread_data->connection_fd = conn_fd;
+    thread_data->client_addr = client_addr;
+
+    list_data_t* list_data = (list_data_t*)malloc(sizeof(list_data_t));
+    if (list_data == NULL) {
+        if (thread_data != NULL) free(thread_data);
+        return NULL;
+    }
+    
+    list_data->item = thread_data;
+
+    return list_data;
+}
+
+void free_conn_list_item(list_data_t* list_data) {
+    if (list_data == NULL) return;
+
+    if (list_data->item != NULL) {
+        free(list_data->item);
+        list_data->item = NULL;
+    }
+    free(list_data);        
+    list_data = NULL;
 }
 
 int main(int argc, char const *argv[]) {
     bool run_as_daemon = false;
-    struct sockaddr_in server_addr, client_addr;
-    socklen_t addr_len = sizeof(client_addr);
+    
+    struct sockaddr_in server_addr;
+    socklen_t addr_len = sizeof(server_addr);
+
+    /* Init threads list */
+    LIST_HEAD(listhead, list_data_s) head;
+    LIST_INIT(&head);
+
+    /* timer thread */
+    pthread_t timer_thread_id;
 
     openlog(LOG_IDENTITY, LOG_PID, LOG_USER);
+
+    /* Init filestore */
+    int err = init_filestore(CONNECTION_DATA_FILE);
+    if(err == -1) {
+        syslog(LOG_ERR, "Filestore init failed: %s", strerror(errno));
+        closelog();
+    }
 
     /* Checking for arguments*/
     int opt;
@@ -210,19 +287,31 @@ int main(int argc, char const *argv[]) {
     if (signal(SIGTERM, signal_handler) == SIG_ERR) {
         syslog(LOG_ERR, "Failed to register SIGTERM: %s", strerror(errno));
         closelog();
-
+        filestore_close();
         return EXIT_FAILURE;
     }
     if (signal(SIGINT, signal_handler) == SIG_ERR) {
         syslog(LOG_ERR, "Failed to register SIGINT: %s", strerror(errno));
         closelog();
+        filestore_close();
+        return EXIT_FAILURE;
+    }
 
+    /* Init timer thread*/
+    if(pthread_create(&timer_thread_id, NULL, timer_thread, NULL) == -1) {
+        syslog(LOG_ERR, "Failed to create timer thread: %s", strerror(errno));
+        
+        closelog();
+        filestore_close();
+        
         return EXIT_FAILURE;
     }
 
     /* Create socket */
     if ((server_sock = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
         syslog(LOG_ERR, "Socket creation failed: %s", strerror(errno));
+        closelog();
+        filestore_close();
         return EXIT_FAILURE;
     }
 
@@ -243,6 +332,7 @@ int main(int argc, char const *argv[]) {
         }
         syslog(LOG_INFO, "Server exiting");
         closelog();
+        filestore_close();
         return EXIT_SUCCESS;
     }
 
@@ -253,6 +343,7 @@ int main(int argc, char const *argv[]) {
         }
         syslog(LOG_INFO, "Server exiting");
         closelog();
+        filestore_close();
         return EXIT_SUCCESS;
     }
 
@@ -260,27 +351,68 @@ int main(int argc, char const *argv[]) {
 
     while (!should_terminate) {
         if(server_sock != -1) {
+            struct sockaddr_in client_addr;
             int client_sock = accept(server_sock, (struct sockaddr *)&client_addr, &addr_len);
             if (client_sock == -1) {
                 syslog(LOG_ERR, "Accept failed: %s", strerror(errno));
-                continue;
+            } else {
+                /* Start connection handling thread */
+                list_data_t* new_data = init_conn_list_item(client_sock, client_addr);
+                if(new_data != NULL) {
+                    LIST_INSERT_HEAD(&head, new_data, entries);
+                    int rc = pthread_create(&new_data->item->thread,
+                                    NULL, // Use default attributes
+                                    handle_connection,
+                                    new_data->item);
+                    syslog(LOG_ERR, "Thread creation result %d \n", rc);
+                } else {
+                    syslog(LOG_ERR, "Failed to allocate item \n");
+                }
+            }  
+        }
+        /* Check and join threads, free memory */
+        list_data_t* data;
+        list_data_t* loop = NULL;
+        LIST_FOREACH_SAFE(data, &head, entries, loop) {
+            if (data->item->thread_complete) {
+                if (pthread_join(data->item->thread, NULL) == 0) {
+                    syslog(LOG_DEBUG, "Thread-%ld terminated\n", data->item->thread);
+                }
+                LIST_REMOVE(data, entries);
+                free_conn_list_item(data);
             }
-
-            handle_connection(client_sock, &client_addr);
         }
     }
 
-    if (remove(CONNECTION_DATA_FILE) == 0) {
-        syslog(LOG_INFO, "Deleted file %s", CONNECTION_DATA_FILE);
+    syslog(LOG_DEBUG, "Starting cleanup procedure...\n");
+    
+    /* TODO: move to function */
+    /* Do a check outside the loop */ 
+    list_data_t* data;
+    if(!LIST_EMPTY(&head)) {
+        LIST_FOREACH(data, &head, entries) {
+            if (data->item->thread_complete) {
+                if (pthread_join(data->item->thread, NULL) == 0) {
+                    syslog(LOG_DEBUG, "Thread-%ld terminated\n", data->item->thread);
+                }
+                LIST_REMOVE(data, entries);
+                free_conn_list_item(data);
+            }
+        }
     } else {
-        syslog(LOG_ERR, "Failed to delete file %s: %s", CONNECTION_DATA_FILE, strerror(errno));
-    }
+        syslog(LOG_DEBUG, "No more running threads\n");
+    }   
+
+    filestore_close(filestore);
 
     if (server_sock != -1) {
         close(server_sock);
     }
     
-    syslog(LOG_INFO, "Server exiting");
+    pthread_cancel(timer_thread_id);
+    pthread_join(timer_thread_id, NULL);
+    
+    syslog(LOG_INFO, "Server exiting\n");
     closelog();
     
     return EXIT_SUCCESS;
