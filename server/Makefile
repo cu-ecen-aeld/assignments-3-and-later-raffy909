@@ -1,8 +1,8 @@
 TARGET=aesdsocket
 
-CC=$(CROSS_COMPILE)gcc
-CFLAGS=-O3 -Wall -Wextra -pedantic -ggdb3 # To get where leaks are
-LDFLAGS=-lpthread
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS = -O3 -Wall -Wextra -pedantic -ggdb3 # To get where leaks are
+LDFLAGS = -lpthread
 
 SRC := $(wildcard *.c)
 OBJS :=  $(SRC:.c=.o)
