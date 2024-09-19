@@ -20,8 +20,13 @@
 #define SERVER_PORT             9000
 #define BACKLOG                 10
 #define CONNECTION_BUFFER_SIZE  65536
+
+#ifndef USE_AESD_CHAR_DEVICE
 #define CONNECTION_DATA_FILE    "/var/tmp/aesdsocketdata"
 #define TIMER_SLEEP             10
+#else
+#define CONNECTION_DATA_FILE    "/dev/aesdchar"
+#endif
 
 /* Thread list types */
 typedef struct {
@@ -175,6 +180,7 @@ void* handle_connection(void *thread_args) {
 }
 
 /* Simplest solution*/
+#ifndef USE_AESD_CHAR_DEVICE
 void* timer_thread(void *args) {
     char timestamp[100];
     while (true) {
@@ -191,6 +197,7 @@ void* timer_thread(void *args) {
     
     return args;
 }
+#endif
 
 list_data_t* init_conn_list_item(int conn_fd, struct sockaddr_in client_addr) {
      thread_data_t* thread_data = (thread_data_t*)malloc(sizeof(thread_data_t));
@@ -235,8 +242,9 @@ int main(int argc, char const *argv[]) {
     LIST_INIT(&head);
 
     /* timer thread */
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_t timer_thread_id;
-
+#endif
     openlog(LOG_IDENTITY, LOG_PID, LOG_USER);
 
     /* Init filestore */
@@ -298,6 +306,7 @@ int main(int argc, char const *argv[]) {
     }
 
     /* Init timer thread*/
+#ifndef USE_AESD_CHAR_DEVICE
     if(pthread_create(&timer_thread_id, NULL, timer_thread, NULL) == -1) {
         syslog(LOG_ERR, "Failed to create timer thread: %s", strerror(errno));
         
@@ -306,6 +315,7 @@ int main(int argc, char const *argv[]) {
         
         return EXIT_FAILURE;
     }
+#endif
 
     /* Create socket */
     if ((server_sock = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
@@ -408,10 +418,10 @@ int main(int argc, char const *argv[]) {
     if (server_sock != -1) {
         close(server_sock);
     }
-    
+#ifndef USE_AESD_CHAR_DEVICE
     pthread_cancel(timer_thread_id);
     pthread_join(timer_thread_id, NULL);
-    
+#endif
     syslog(LOG_INFO, "Server exiting\n");
     closelog();
     
