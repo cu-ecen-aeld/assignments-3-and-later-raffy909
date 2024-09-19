@@ -16,6 +16,8 @@
 #include "read_line.h"
 #include "queue.h"
 
+#define USE_AESD_CHAR_DEVICE
+
 #define LOG_IDENTITY            "aesdsocketd"
 #define SERVER_PORT             9000
 #define BACKLOG                 10
