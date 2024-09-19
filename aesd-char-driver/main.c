@@ -121,7 +121,8 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         goto exit_free;
     }
 
-    for(int i = 0; i < count; i++) {
+    int i;
+    for(i = 0; i < count; i++) {
         if (kbuf[i] == '\n') {
             newline_pos = i;
             break;
@@ -199,7 +200,7 @@ int aesd_init_module(void)
     /**
      * TODO: initialize the AESD specific portion of the device
      */
-    mutex_init(&aesd_device.lock);r
+    mutex_init(&aesd_device.lock);
     aesd_circular_buffer_init(&aesd_device.buffer);
 
     result = aesd_setup_cdev(&aesd_device);
