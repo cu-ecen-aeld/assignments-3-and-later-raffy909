@@ -110,7 +110,7 @@ int filestore_read_to_dest(int dest_fd) {
     } else {
         lseek(filestore.fd, 0, SEEK_SET);
         while ((bytes_read = read(filestore.fd, file_buffer, 1024)) > 0 && ret != -1) {
-            syslog(LOG_DEBUG, "Sending %ld", bytes_read);
+            syslog(LOG_INFO, "Sending %ld", bytes_read);
             if (send(dest_fd, file_buffer, bytes_read, 0) == -1) {
                 syslog(LOG_ERR, "Failed to send data to client: %s", strerror(errno));
                 ret = -1;
@@ -127,7 +127,6 @@ int filestore_read_to_dest(int dest_fd) {
         }
     }
 
-    fclose(filestore.fd);
     return ret;
 }   
 
