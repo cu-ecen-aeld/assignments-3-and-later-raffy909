@@ -3,11 +3,11 @@
 NAME=aesdchar
 
 do_start() {
-  aesdchar_load
+  /usr/bin/aesdchar_load
 }
 
 do_stop() {
-  aesdchar_unload
+  /usr/bin/aesdchar_unload
 }
 
 do_status() {

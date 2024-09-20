@@ -127,7 +127,7 @@ int filestore_read_to_dest(int dest_fd) {
         }
     }
 
-    
+    fclose(filestore.fd);
     return ret;
 }   
 
@@ -414,9 +414,9 @@ int main(int argc, char const *argv[]) {
     } else {
         syslog(LOG_DEBUG, "No more running threads\n");
     }   
-
+#ifndef USE_AESD_CHAR_DEVICE
     filestore_close(filestore);
-
+#endif
     if (server_sock != -1) {
         close(server_sock);
     }
