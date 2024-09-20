@@ -75,11 +75,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     entry = aesd_circular_buffer_find_entry_offset_for_fpos(&dev->buffer, *f_pos, &entry_offset_byte);
     if (entry == NULL) {
         mutex_unlock(&dev->lock);
-        return 0;  // Nessun dato da leggere
+        return 0;
     }
 
-    // Determina quanti byte copiare
     bytes_to_copy = min(count, entry->size - entry_offset_byte);
+    PDEBUG("Sending to user %s", entry->buffptr);
     if (copy_to_user(buf, entry->buffptr + entry_offset_byte, bytes_to_copy)) {
         retval = -EFAULT;
         goto exit;
