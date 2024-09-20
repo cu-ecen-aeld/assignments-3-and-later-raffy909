@@ -38,6 +38,7 @@ int aesd_open(struct inode *inode, struct file *filp)
     /**
      * TODO: handle open
      */
+
 	dev = container_of(inode->i_cdev, struct aesd_dev, cdev);
 	filp->private_data = dev;
 
@@ -201,6 +202,10 @@ int aesd_init_module(void)
      * TODO: initialize the AESD specific portion of the device
      */
     mutex_init(&aesd_device.lock);
+    
+    aesd_device.entry.buffptr = NULL;
+    aesd_device.entry.size = 0;
+    
     aesd_circular_buffer_init(&aesd_device.buffer);
 
     result = aesd_setup_cdev(&aesd_device);
@@ -219,7 +224,7 @@ void aesd_cleanup_module(void)
     
     dev_t devno = MKDEV(aesd_major, aesd_minor);
 
-    cdev_del(&aesd_device.cdev);
+    kfree(&aesd_device.entry);
 
     AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) {
         if (entry->buffptr != NULL) {
