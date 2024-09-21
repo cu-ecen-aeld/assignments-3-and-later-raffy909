@@ -44,15 +44,20 @@ struct list_data_s {
     LIST_ENTRY(list_data_s) entries;
 };
 
+#ifndef USE_AESD_CHAR_DEVICE
 /* Filestore types */
 typedef struct file_store_s {
     int fd;
     pthread_mutex_t file_mutex; 
 } file_store_t;
 
+file_store_t filestore;
+#else 
+pthread_mutex_t file_mutex; 
+#endif
 
 int server_sock = -1;
-file_store_t filestore;
+
 bool should_terminate = false;
 
 void signal_handler(int signum) {
@@ -64,6 +69,7 @@ void signal_handler(int signum) {
 }
 
 /* Filestore functions */
+#ifndef USE_AESD_CHAR_DEVICE
 int init_filestore() {
     filestore.fd = open(CONNECTION_DATA_FILE, O_RDWR | O_CREAT | O_APPEND, 0644);
     if (filestore.fd == -1) {
@@ -139,6 +145,73 @@ void filestore_close() {
     }
     //free(filestore);
 }
+#else
+int filestore_write(char* data, size_t len) {
+    int fd;
+
+    int rc = pthread_mutex_lock(&file_mutex);
+    if ( rc != 0 ) {
+        syslog(LOG_ERR, "Failed to acquire filestore mutex");
+        return -1;
+    }
+
+    fd = open(CONNECTION_DATA_FILE, O_WRONLY);
+	lseek(fd, 0, SEEK_END);
+
+    if (write(fd, data, len) == -1) {
+        syslog(LOG_ERR, "Failed to write to file: %s", strerror(errno));
+        return -1;
+    }
+    rc = pthread_mutex_unlock(&file_mutex);
+    if ( rc != 0 ) {
+        syslog(LOG_ERR, "Failed to release filestore mutex");
+        return -1;
+    }
+    
+    close(fd);
+    return 0;
+}
+
+int filestore_read_to_dest(int dest_fd) {
+    int fd;
+    int ret = 0;
+    size_t bytes_read;
+    char file_buffer[1024];
+
+    int rc = pthread_mutex_lock(&file_mutex);
+    if ( rc != 0 ) {
+        syslog(LOG_ERR, "Failed to acquire filestore mutex");
+        ret = -1;
+    } else {
+        fd = open(CONNECTION_DATA_FILE, O_RDONLY);
+        if(fd == -1) {
+            syslog(LOG_ERR, "Failed to send data to client: %s", strerror(errno));
+            ret = -1;
+        }
+        lseek(fd, 0, SEEK_SET);
+        while ((bytes_read = read(fd, file_buffer, 1024)) > 0 && ret != -1) {
+            syslog(LOG_INFO, "Sending %s", file_buffer);
+            if (send(dest_fd, file_buffer, bytes_read, 0) == -1) {
+                syslog(LOG_ERR, "Failed to send data to client: %s", strerror(errno));
+                ret = -1;
+            }
+        }
+        if (bytes_read == -1UL) {
+            syslog(LOG_ERR, "Failed to read from file: %s", strerror(errno));
+            ret = -1;
+        }
+        rc = pthread_mutex_unlock(&file_mutex);
+        if ( rc != 0 ) {
+            syslog(LOG_ERR, "Failed to release filestore mutex");
+            ret =  -1;
+        }
+        close(fd);
+    }
+
+    return ret;
+}
+
+#endif
 
 void* handle_connection(void *thread_args) {
     ssize_t bytes_received;
@@ -249,12 +322,13 @@ int main(int argc, char const *argv[]) {
     openlog(LOG_IDENTITY, LOG_PID, LOG_USER);
 
     /* Init filestore */
+#ifndef USE_AESD_CHAR_DEVICE
     int err = init_filestore(CONNECTION_DATA_FILE);
     if(err == -1) {
         syslog(LOG_ERR, "Filestore init failed: %s", strerror(errno));
         closelog();
     }
-
+#endif
     /* Checking for arguments*/
     int opt;
     while ((opt = getopt(argc, (char* const*)argv, "d")) != -1) {
@@ -296,13 +370,17 @@ int main(int argc, char const *argv[]) {
     if (signal(SIGTERM, signal_handler) == SIG_ERR) {
         syslog(LOG_ERR, "Failed to register SIGTERM: %s", strerror(errno));
         closelog();
+#ifndef USE_AESD_CHAR_DEVICE
         filestore_close();
+#endif
         return EXIT_FAILURE;
     }
     if (signal(SIGINT, signal_handler) == SIG_ERR) {
         syslog(LOG_ERR, "Failed to register SIGINT: %s", strerror(errno));
         closelog();
+#ifndef USE_AESD_CHAR_DEVICE
         filestore_close();
+#endif
         return EXIT_FAILURE;
     }
 
@@ -322,7 +400,9 @@ int main(int argc, char const *argv[]) {
     if ((server_sock = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
         syslog(LOG_ERR, "Socket creation failed: %s", strerror(errno));
         closelog();
+#ifndef USE_AESD_CHAR_DEVICE
         filestore_close();
+#endif        
         return EXIT_FAILURE;
     }
 
@@ -343,7 +423,9 @@ int main(int argc, char const *argv[]) {
         }
         syslog(LOG_INFO, "Server exiting");
         closelog();
+#ifndef USE_AESD_CHAR_DEVICE
         filestore_close();
+#endif
         return EXIT_SUCCESS;
     }
 
@@ -354,7 +436,9 @@ int main(int argc, char const *argv[]) {
         }
         syslog(LOG_INFO, "Server exiting");
         closelog();
+#ifndef USE_AESD_CHAR_DEVICE
         filestore_close();
+#endif
         return EXIT_SUCCESS;
     }
 
