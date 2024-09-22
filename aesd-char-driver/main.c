@@ -224,8 +224,12 @@ void aesd_cleanup_module(void)
     
     dev_t devno = MKDEV(aesd_major, aesd_minor);
 
-    kfree(&aesd_device.entry);
+    PDEBUG("Freeing temp buffer\n");
+    if(aesd_device.entry.buffptr != NULL) {
+        kfree(aesd_device.entry.buffptr);
+    }
 
+    PDEBUG("Freeing main buffer\n");
     AESD_CIRCULAR_BUFFER_FOREACH(entry, &aesd_device.buffer, index) {
         if (entry->buffptr != NULL) {
             kfree(entry->buffptr);
