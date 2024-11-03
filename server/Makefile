@@ -10,7 +10,7 @@ OBJS :=  $(SRC:.c=.o)
 all: $(TARGET)
 
 %.o: %.c
-	$(CC) $(CFLAGS) -c -I. $< -o $@
+	$(CC) $(CFLAGS) -c -I. -I../aesd-char-driver/aesd_ioctl.h $< -o $@
 	
 $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) $(LDFLAGS)

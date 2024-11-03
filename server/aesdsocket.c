@@ -16,6 +16,8 @@
 #include "read_line.h"
 #include "queue.h"
 
+#include "aesd_ioctl.h"
+
 #define USE_AESD_CHAR_DEVICE
 
 #define LOG_IDENTITY            "aesdsocketd"
@@ -27,6 +29,7 @@
 #define CONNECTION_DATA_FILE    "/var/tmp/aesdsocketdata"
 #define TIMER_SLEEP             10
 #else
+#define IOCTL_CMD "AESDCHAR_IOCSEEKTO"
 #define CONNECTION_DATA_FILE    "/dev/aesdchar"
 #endif
 
@@ -213,6 +216,48 @@ int filestore_read_to_dest(int dest_fd) {
 
 #endif
 
+// Handling ioctl command
+#ifdef USE_AESD_CHAR_DEVICE
+static int handle_ioctl(int connection_fd, int cmd, int offset) {
+    int ret;
+    FILE *fp;
+    struct aesd_seekto seekto;
+    uint8_t buff[1024];
+
+    // Open file
+    if ((fp = fopen(CONNECTION_DATA_FILE, "w+")) == NULL) {
+        return errno;
+    }
+
+    syslog(LOG_INFO, "Setting up ioctl cmd %lu with struct arg : %d, %d", AESDCHAR_IOCSEEKTO, cmd, offset);
+    // Send ioct command
+    seekto.write_cmd = cmd;
+    seekto.write_cmd_offset = offset;
+    if ((ioctl(fileno(fp), AESDCHAR_IOCSEEKTO, &seekto)) != 0) {
+        return errno;
+    }
+
+    // Send data back
+    while (!feof(fp)) {
+        size_t len = fread(buff, 1, sizeof(buff), fp);
+        if (ferror(fp) != 0) {
+            ret = errno;
+            goto exit;
+        }
+
+        if (send(connection_fd, buff, len, 0) < 0) {
+            ret = errno;
+            goto exit;
+        }
+    }
+
+exit:
+    fclose(fp);
+    return ret;
+}
+#endif
+
+
 void* handle_connection(void *thread_args) {
     ssize_t bytes_received;
     char conn_buffer[CONNECTION_BUFFER_SIZE];
@@ -228,7 +273,24 @@ void* handle_connection(void *thread_args) {
     /* Handling data */
     while(((bytes_received = read_line(thread_func_args->connection_fd, conn_buffer, CONNECTION_BUFFER_SIZE)) > 0 && !should_terminate) && !operation_failed) {
         syslog(LOG_DEBUG, "[Thread-%ld] Newline found", thread_func_args->thread); 
-    
+
+#ifdef USE_AESD_CHAR_DEVICE
+        if (strstr(conn_buffer, IOCTL_CMD) != NULL && strlen(conn_buffer) >= 18) {
+            printf("Data: %s \n", conn_buffer);
+            int ret = 0;
+            int cmd;
+            int offset;
+
+            ret = sscanf(&conn_buffer[strlen(IOCTL_CMD) + 1], "%d,%d", &cmd, &offset);
+            if (ret == 2) {
+                ret = handle_ioctl(thread_func_args->connection_fd, cmd, offset);
+                if (ret != 0) {
+                    syslog(LOG_ERR, "[Thread-%ld]Failed to handle ioctl: %s\n", thread_func_args->thread,  strerror(ret));
+                }
+            }
+            continue;
+        } else {
+#endif
         if(filestore_write(conn_buffer, bytes_received) == -1) {
             syslog(LOG_ERR, "[Thread-%ld] Write failed to filestore\n", thread_func_args->thread);
             operation_failed = true;
@@ -238,6 +300,9 @@ void* handle_connection(void *thread_args) {
             syslog(LOG_ERR, "[Thread-%ld] Read failed to filestore\n", thread_func_args->thread);
             operation_failed = true;
         }
+#ifdef USE_AESD_CHAR_DEVICE
+        }
+#endif
     }
 
     if (bytes_received == -1) {
